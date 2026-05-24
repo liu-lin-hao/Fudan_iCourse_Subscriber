@@ -193,17 +193,9 @@ class LectureRunner:
             return None, None
 
         try:
-            self._scheduler.set_asr_active(True)
-            try:
-                transcript, segments = self._transcriber.transcribe_tail(
-                    handle.path, handle.process, handle.stderr_chunks,
-                )
-            finally:
-                # Always release the OCR concurrency cap, even on
-                # NoAudioStreamError / IncompleteAudioError / generic
-                # failure — otherwise a single ASR exception would leave
-                # OCR throttled at half-cores for the remainder of the run.
-                self._scheduler.set_asr_active(False)
+            transcript, segments = self._transcriber.transcribe_tail(
+                handle.path, handle.process, handle.stderr_chunks,
+            )
         except NoAudioStreamError as e:
             self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
             self._db.update_error(sub_id, "transcribe", str(e))

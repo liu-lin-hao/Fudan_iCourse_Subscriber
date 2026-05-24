@@ -9,7 +9,7 @@ changes happen in exactly one file.  Two reasons:
      leaks state everywhere.
 
 Thread safety: all emission methods take ``self._lock`` so concurrent
-workers (image downloads, OCR, ResourceMonitor) interleave cleanly.
+workers (image downloads, OCR, audio downloader) interleave cleanly.
 """
 
 from __future__ import annotations
@@ -30,17 +30,12 @@ class Reporter:
     # ── Throttling cadences ──
     IMAGE_PROGRESS_EVERY_PICS = 30  # emit a line every 30 finished images
     OCR_PROGRESS_EVERY_PAGES = 20   # emit a line every 20 OCR'd pages
-    CPU_SNAPSHOT_INTERVAL_SEC = 60.0  # emit a snapshot at most every 60 s
 
     def __init__(self):
         self._lock = threading.Lock()
         # sub_id -> (last_done_emitted_at_count, t0, last_print_t)
         self._image_progress_state: dict[str, dict] = {}
-        # Mirror state for OCR completions. Keyed by sub_id because the
-        # prefetch pipeline may have multiple lectures' OCR in flight at
-        # once (next lecture's PPT primes while current lecture's ASR runs).
         self._ocr_progress_state: dict[str, dict] = {}
-        self._last_cpu_snapshot_t: float = 0.0
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -176,12 +171,9 @@ class Reporter:
     # pipeline may submit the next lecture's OCR work before this lecture's
     # OCR drains, so two streams can overlap.
     #
-    # Distinction from cpu_snapshot's "OCR busy/target/max": those numbers
-    # are *pool occupancy* (how many slots are in flight right now). This
-    # one is *throughput* (pages OCR'd per second).  Both useful, neither
-    # substitutes for the other — the snapshot answered "did the
-    # ResourceMonitor steer OCR concurrency?", this answers "how fast is
-    # OCR actually finishing pages?".
+    # Distinction from pool-occupancy metrics (which show how many OCR
+    # slots are in flight): this one is *throughput* (pages OCR'd per
+    # second).  Both useful, neither substitutes for the other.
 
     def ocr_progress_start(self, sub_id: str, total: int):
         """Record t0 for a sub_id's OCR phase so page/s can be computed."""
@@ -230,33 +222,6 @@ class Reporter:
             return "[" + " " * width + "]"
         filled = int(width * done / total)
         return "[" + "#" * filled + "-" * (width - filled) + "]"
-
-    # ── Resource snapshot (throttled CPU / pool state) ──────────────────
-
-    def cpu_snapshot(self, cpu_pct: float,
-                     ocr_busy: int, ocr_target: int, ocr_max: int,
-                     image_busy: int, image_max: int,
-                     audio_busy: int, audio_max: int):
-        """ResourceMonitor calls this every poll; we throttle to one print
-        per CPU_SNAPSHOT_INTERVAL_SEC.  Always re-evaluates on call, so the
-        printed value is the most recent reading at the print instant."""
-        with self._lock:
-            now = time.time()
-            if now - self._last_cpu_snapshot_t < self.CPU_SNAPSHOT_INTERVAL_SEC:
-                return
-            self._last_cpu_snapshot_t = now
-            print(f"    [Resource] CPU {cpu_pct:5.1f}%  "
-                  f"OCR {ocr_busy}/{ocr_target} (max {ocr_max})  "
-                  f"img {image_busy}/{image_max}  "
-                  f"audio {audio_busy}/{audio_max}", flush=True)
-
-    def cpu_target_changed(self, old: int, new: int, cpu_pct: float):
-        """Always-emit log line: ResourceMonitor changed the OCR target.
-        Less frequent than snapshots so it doesn't need throttling."""
-        with self._lock:
-            direction = "↑" if new > old else "↓"
-            print(f"    [Resource] OCR target {old} {direction} {new} "
-                  f"(cpu={cpu_pct:.1f}%)", flush=True)
 
     # ── Prefetch / audio download ────────────────────────────────────────
 

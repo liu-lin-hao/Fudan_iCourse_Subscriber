@@ -31,9 +31,8 @@ MODEL_PROVIDERS: list[dict] = [
         "base_url_env": "DEEPSEEK_BASE_URL",
         "default_base_url": "https://api.deepseek.com",
         "models": [
-            "deepseek-v4-pro",
             "deepseek-v4-flash",
-        ],
+],
     },
     {
         "name": "modelscope",
@@ -66,7 +65,19 @@ MODEL_PROVIDERS: list[dict] = [
             "gemini-2.5-flash",
             "gemini-3-flash-preview",
         ],
-    },
+    },   
+    {
+        "name": "modelscope",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "base_url_env": "DASHSCOPE_BASE_URL",
+        "default_base_url": "https://api-inference.modelscope.cn/v1/",
+        "models": [
+            "deepseek-ai/DeepSeek-V3.2",
+            "ZhipuAI/GLM-5",
+            "MiniMax/MiniMax-M2.5",
+            "Qwen/Qwen3.5-397B-A17B",
+        ],
+    }
 ]
 
 
@@ -145,38 +156,19 @@ SILERO_VAD_PATH = os.environ.get("SILERO_VAD_PATH", "silero_vad.onnx")
 #   firered    — sherpa-onnx-fire-red-asr2-ctc-* (CTC, single model.onnx)
 #   zipformer  — sherpa-onnx-zipformer-* (transducer, encoder/decoder/joiner)
 ASR_BACKEND = os.environ.get("ASR_BACKEND", "sensevoice").strip().lower()
-# Inference thread count.  4 fully saturates a 4-vCPU GitHub runner when
-# ASR is the only thing on the box.  When OCR overlaps, the Scheduler's
-# set_asr_active() caps OCR concurrency at OCR_MAX_TARGET_WHEN_ASR_ACTIVE
-# so the two workloads share predictably.
+# Inference thread count.  4 fully saturates a 4-vCPU GitHub runner.
 ASR_NUM_THREADS = int(os.environ.get("ASR_NUM_THREADS", "4"))
 
 # ── Scheduler concurrency knobs.  All overridable via env. ────────────────
 # image_pool: image downloads are tiny and IO-bound, 20 saturates bandwidth
 # without hammering the iCourse server.
 IMAGE_WORKERS = int(os.environ.get("IMAGE_WORKERS", "20"))
-# ocr_pool: CPU-bound RapidOCR runs.  Pool size = ceiling; the DynamicSemaphore
-# controlled by ResourceMonitor decides how many of those workers can actually
-# execute at the same instant.
+# OCR pool: pool size is the hard ceiling; a fixed BoundedSemaphore(OCR_MAX_TARGET)
+# gates live concurrency since RapidOCR is single-threaded CPU-bound.
 OCR_MAX_WORKERS = int(os.environ.get("OCR_MAX_WORKERS", "8"))
-OCR_INITIAL_TARGET = int(os.environ.get("OCR_INITIAL_TARGET", "3"))
-OCR_MIN_TARGET = int(os.environ.get("OCR_MIN_TARGET", "1"))
-# RapidOCR is single-threaded CPU-bound — one page fully saturates one
-# core.  Raising this beyond 2 yields no throughput gain but creates
-# noisy ResourceMonitor target-churn logs every second.
+# Fixed cap — no dynamic CPU-based adjustment.  RapidOCR is single-threaded;
+# more than 2 concurrent workers don't increase throughput on 4-core runners.
 OCR_MAX_TARGET = int(os.environ.get("OCR_MAX_TARGET", "2"))
-# When the LectureRunner is mid-ASR, the OCR pool's effective max target
-# drops to this value so the ASR thread block (now num_threads=4) doesn't
-# contend with a saturated OCR pool.  Workload split: ASR gets ~2 effective
-# cores, OCR gets ~2.  Outside ASR phases (resummarize, between lectures)
-# OCR is allowed to ramp up to OCR_MAX_TARGET again.
-OCR_MAX_TARGET_WHEN_ASR_ACTIVE = int(
-    os.environ.get("OCR_MAX_TARGET_WHEN_ASR_ACTIVE", "2")
-)
-# ResourceMonitor thresholds (percent CPU). Outside [LOW, HIGH] we adjust
-# OCR target down/up by 1 each second.
-RESOURCE_MONITOR_CPU_HIGH = int(os.environ.get("RESOURCE_MONITOR_CPU_HIGH", "95"))
-RESOURCE_MONITOR_CPU_LOW = int(os.environ.get("RESOURCE_MONITOR_CPU_LOW", "75"))
 # Two concurrent ffmpeg audio extractions: the current lecture being
 # transcribed + one pre-decoded for the next lecture.  Bandwidth-fair sharing
 # at 20 MB/s split = ~10 MB/s each.

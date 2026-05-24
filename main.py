@@ -266,7 +266,6 @@ def run():
         return
 
     scheduler = Scheduler(reporter=reporter)
-    scheduler.start()
 
     try:
         all_lectures = _enumerate_lectures(client, db, reporter)

@@ -1,12 +1,10 @@
-"""Concurrency primitives: thread pools, prefetch caches, resource monitor.
+"""Concurrency primitives: thread pools, prefetch caches, audio downloader.
 
 Owns three resource pools and coordinates work across them so the
 LectureRunner can focus on per-lecture business logic.
 
   image_pool       20 workers   IO bound  (per-image HTTP)
-  ocr_pool          8 workers   CPU bound (RapidOCR runs)
-                                       └── gated by DynamicSemaphore whose
-                                           target is steered by ResourceMonitor
+  ocr_pool          8 workers   CPU bound (RapidOCR), gated by BoundedSemaphore(2)
   audio_downloader  2 slots     IO bound  (ffmpeg URL → audio.raw to disk)
 
 The audio downloader is special: each "slot" hosts a running ffmpeg process
@@ -14,11 +12,6 @@ that writes f32le mono 16 kHz audio to a per-sub_id scratch file.  Transcriber
 reads that file with tail-f semantics while ffmpeg is still writing — so the
 network download isn't bottlenecked by ASR speed and the ASR isn't blocked
 on download completion.  See ``AudioDownloader`` below.
-
-ResourceMonitor polls ``psutil.cpu_percent()`` every second and nudges the
-OCR semaphore target up/down to keep CPU "as close to 100 % as possible
-without going over".  The pool size is the hard ceiling; the semaphore
-target is the soft live concurrency.
 """
 
 from __future__ import annotations
@@ -31,172 +24,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import psutil
-
 from src.runtime import config
-from src.api import icourse# ── DynamicSemaphore ────────────────────────────────────────────────────────
-
-class DynamicSemaphore:
-    """A semaphore whose target permit count can be retuned at runtime.
-
-    Python's stdlib has no resize for ``ThreadPoolExecutor``, so we keep a
-    fixed-size pool of MAX worker threads and gate "is now actually allowed
-    to run" with this primitive.  Reducing the target makes new acquirers
-    wait; in-flight workers complete naturally.  Increasing the target
-    wakes waiters in order.
-
-    Thread safety: every state change goes through the internal Condition.
-    """
-
-    def __init__(self, target: int):
-        self._target = int(target)
-        self._busy = 0
-        self._cond = threading.Condition()
-
-    @property
-    def target(self) -> int:
-        with self._cond:
-            return self._target
-
-    @property
-    def busy(self) -> int:
-        with self._cond:
-            return self._busy
-
-    def set_target(self, target: int) -> None:
-        with self._cond:
-            self._target = max(1, int(target))
-            self._cond.notify_all()
-
-    def acquire(self) -> None:
-        with self._cond:
-            while self._busy >= self._target:
-                self._cond.wait()
-            self._busy += 1
-
-    def release(self) -> None:
-        with self._cond:
-            self._busy -= 1
-            self._cond.notify()
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *_a):
-        self.release()
-
-
-# ── ResourceMonitor ─────────────────────────────────────────────────────────
-
-class ResourceMonitor:
-    """Adjusts OCR concurrency from CPU pressure on a daemon thread.
-
-    Started by ``Scheduler.start()``; stopped by ``Scheduler.shutdown()``.
-    Independent of the OCR work itself — even when no OCR is happening, the
-    monitor still ticks so its snapshots show useful CPU readings.
-
-    Loop:
-      every 1 s
-        cpu = psutil.cpu_percent()
-        if cpu < LOW  and target < MAX_TARGET: target += 1
-        if cpu > HIGH and target > MIN_TARGET: target -= 1
-        reporter.cpu_snapshot(...)   # throttled to 60 s internally
-    """
-
-    POLL_INTERVAL = 1.0
-
-    def __init__(self, ocr_sem: DynamicSemaphore,
-                 image_pool: ThreadPoolExecutor,
-                 audio_downloader: "AudioDownloader",
-                 reporter, *,
-                 max_target: int = None, min_target: int = None,
-                 cpu_high: int = None, cpu_low: int = None,
-                 max_target_when_asr: int = None):
-        self._sem = ocr_sem
-        self._image_pool = image_pool
-        self._audio_downloader = audio_downloader
-        self._reporter = reporter
-        self._max_target_alone = max_target or config.OCR_MAX_TARGET
-        self._max_target_when_asr = (
-            max_target_when_asr or config.OCR_MAX_TARGET_WHEN_ASR_ACTIVE
-        )
-        # ASR-active flag — flipped by Scheduler.set_asr_active() from
-        # LectureRunner around its ASR phase.  When True, OCR can ramp
-        # only up to _max_target_when_asr (≈half the cores) so ASR's
-        # num_threads=4 thread block has space to actually run on the
-        # remaining cores; when False, OCR is free to use all of
-        # _max_target_alone (≈full cores) so resummarize-only and
-        # between-lecture phases aren't artificially throttled.
-        self._asr_active = False
-        self._min_target = min_target or config.OCR_MIN_TARGET
-        self._cpu_high = cpu_high or config.RESOURCE_MONITOR_CPU_HIGH
-        self._cpu_low = cpu_low or config.RESOURCE_MONITOR_CPU_LOW
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        # Prime psutil — the first call always returns 0.0.
-        psutil.cpu_percent(interval=None)
-
-    @property
-    def effective_max_target(self) -> int:
-        """Cap on OCR concurrency given current ASR state."""
-        return (self._max_target_when_asr if self._asr_active
-                else self._max_target_alone)
-
-    def set_asr_active(self, active: bool) -> None:
-        """Flag ASR phase entry/exit.  When flipped True, immediately clamp
-        the current OCR target down to the new max so an in-flight 5-worker
-        OCR run doesn't keep stealing cores from ASR's first second."""
-        prev = self._asr_active
-        self._asr_active = bool(active)
-        if prev != self._asr_active:
-            new_max = self.effective_max_target
-            if self._sem.target > new_max:
-                old = self._sem.target
-                self._sem.set_target(new_max)
-                self._reporter.cpu_target_changed(old, new_max, -1.0)
-
-    def start(self):
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._loop, name="resource-monitor", daemon=True,
-        )
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-
-    def _loop(self):
-        while not self._stop.is_set():
-            self._stop.wait(self.POLL_INTERVAL)
-            if self._stop.is_set():
-                return
-            cpu = psutil.cpu_percent(interval=None)
-            self._maybe_retune(cpu)
-            self._reporter.cpu_snapshot(
-                cpu_pct=cpu,
-                ocr_busy=self._sem.busy,
-                ocr_target=self._sem.target,
-                ocr_max=self.effective_max_target,
-                image_busy=getattr(self._image_pool, "_work_queue", None) is not None
-                            and self._image_pool._work_queue.qsize() or 0,
-                image_max=self._image_pool._max_workers,
-                audio_busy=self._audio_downloader.active_count,
-                audio_max=self._audio_downloader.max_concurrent,
-            )
-
-    def _maybe_retune(self, cpu: float):
-        old = self._sem.target
-        cap = self.effective_max_target
-        if cpu < self._cpu_low and old < cap:
-            self._sem.set_target(old + 1)
-            self._reporter.cpu_target_changed(old, old + 1, cpu)
-        elif cpu > self._cpu_high and old > self._min_target:
-            self._sem.set_target(old - 1)
-            self._reporter.cpu_target_changed(old, old - 1, cpu)
+from src.api import icourse
 
 
 # ── PrefetchCache (per-sub_id image bytes) ─────────────────────────────────
@@ -508,14 +337,19 @@ class Scheduler:
     """Single façade owning every concurrency primitive.
 
     LectureRunner gets one Scheduler.  Through it, every other layer talks
-    to pools, prefetch caches, and the resource monitor by name — no module
-    holds its own ThreadPoolExecutor.
+    to pools and prefetch caches by name — no module holds its own
+    ThreadPoolExecutor.
+
+    OCR concurrency is capped by a fixed BoundedSemaphore (2 permits).
+    RapidOCR is single-threaded CPU-bound; more than 2 concurrent workers
+    don't increase throughput on a 4-core runner and waste cycles on
+    contention.  There is no dynamic adjustment — the simple fixed cap is
+    both sufficient and easier to reason about.
 
     Lifecycle:
         scheduler = Scheduler(reporter=...)
-        scheduler.start()           # spawns ResourceMonitor thread
         ... LectureRunner uses it ...
-        scheduler.shutdown()        # drains pools, kills ffmpegs, stops monitor
+        scheduler.shutdown()        # drains pools, kills ffmpegs
     """
 
     def __init__(self, reporter):
@@ -526,24 +360,15 @@ class Scheduler:
         self.ocr_pool = ThreadPoolExecutor(
             max_workers=config.OCR_MAX_WORKERS, thread_name_prefix="ocr",
         )
-        self.ocr_semaphore = DynamicSemaphore(config.OCR_INITIAL_TARGET)
+        self._ocr_sem = threading.BoundedSemaphore(
+            config.OCR_MAX_TARGET
+        )
         self.image_cache = PrefetchCache(self.image_pool, reporter=reporter)
         self.audio_downloader = AudioDownloader(
             audio_dir=config.AUDIO_DIR,
             max_concurrent=config.VIDEO_DOWNLOAD_CONCURRENCY,
             reporter=reporter,
         )
-        self._monitor = ResourceMonitor(
-            self.ocr_semaphore, self.image_pool, self.audio_downloader,
-            reporter,
-        )
-
-    def start(self):
-        self._monitor.start()
-
-    def set_asr_active(self, active: bool) -> None:
-        """Forward to ResourceMonitor so the OCR concurrency cap adapts."""
-        self._monitor.set_asr_active(active)
 
     def prefetch_lecture(self, client, course_id: str, sub_id: str) -> None:
         """Schedule image + audio prefetch for a future lecture."""
@@ -551,26 +376,17 @@ class Scheduler:
         self.audio_downloader.schedule(client, course_id, sub_id)
 
     def submit_ocr(self, fn: Callable, *args, **kwargs) -> Future:
-        """Submit an OCR job. The worker acquires the dynamic semaphore
-        before doing real work, so live concurrency stays at the current
-        target even though pool size is up to OCR_MAX_WORKERS."""
+        """Submit an OCR job.  Live concurrency is capped at
+        OCR_MAX_TARGET (2) by a fixed BoundedSemaphore — no dynamic
+        CPU-based adjustment since RapidOCR is single-threaded and
+        never benefits from more than 2 concurrent workers on a 4-core
+        runner."""
         def _wrapped():
-            with self.ocr_semaphore:
+            with self._ocr_sem:
                 return fn(*args, **kwargs)
         return self.ocr_pool.submit(_wrapped)
 
-    def snapshot(self) -> ResourceSnapshot:
-        return ResourceSnapshot(
-            cpu_pct=psutil.cpu_percent(interval=None),
-            ocr_busy=self.ocr_semaphore.busy,
-            ocr_target=self.ocr_semaphore.target,
-            image_busy=self.image_pool._work_queue.qsize()
-                       if hasattr(self.image_pool, "_work_queue") else 0,
-            audio_busy=self.audio_downloader.active_count,
-        )
-
     def shutdown(self) -> None:
-        self._monitor.stop()
         self.audio_downloader.shutdown()
         self.image_pool.shutdown(wait=True)
         self.ocr_pool.shutdown(wait=True)
