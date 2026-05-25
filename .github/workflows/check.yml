@@ -183,6 +183,11 @@ jobs:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
+          # Persisted by the sharder into meta('subscribed_course_ids')
+          # so single_run.yml / reshard.yml (which run with a different
+          # COURSE_IDS) still know the user's real subscription and
+          # don't reclassify everything as cold.
+          SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
