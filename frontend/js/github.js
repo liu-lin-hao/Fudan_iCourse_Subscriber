@@ -182,13 +182,13 @@ async function _fetchShardManifest(owner, repo, branch, token) {
 let _sodiumPromise = null;
 function _ensureSodium() {
   if (!_sodiumPromise) {
-    if (typeof window.libsodium === "undefined" || !window.libsodium.ready) {
+    if (typeof window.sodium === "undefined" || !window.sodium.ready) {
       throw new Error(
-        "libsodium-wrappers not loaded — make sure the sodium CDN " +
-        "<script> tag is present before js/github.js"
+        "libsodium-wrappers not loaded — make sure both libsodium and " +
+        "libsodium-wrappers CDN <script> tags are present before js/github.js"
       );
     }
-    _sodiumPromise = window.libsodium.ready.then(() => window.libsodium);
+    _sodiumPromise = window.sodium.ready.then(() => window.sodium);
   }
   return _sodiumPromise;
 }

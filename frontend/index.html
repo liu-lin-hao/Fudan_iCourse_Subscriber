@@ -796,8 +796,11 @@
 <!-- KaTeX + auto-render -->
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"></script>
-<!-- libsodium-wrappers (sealed-box encryption for GitHub Secrets PUT) -->
-<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.15/dist/modules/libsodium-wrappers.js"></script>
+<!-- libsodium + libsodium-wrappers (sealed-box encryption for GitHub Secrets PUT).
+     The wrapper depends on window.libsodium being defined first, and exposes
+     itself as window.sodium. Loading order matters; do not mark these defer. -->
+<script src="https://cdn.jsdelivr.net/npm/libsodium@0.7.15/dist/modules/libsodium.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.15/dist/modules/libsodium-wrappers.min.js"></script>
 <!-- App scripts (defer, in order, before Alpine) -->
 <script defer src="js/crypto.js"></script>
 <script defer src="js/github.js"></script>
