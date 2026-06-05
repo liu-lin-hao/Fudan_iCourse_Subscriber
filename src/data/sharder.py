@@ -559,11 +559,17 @@ def _migrate_shard_schema(target: sqlite3.Connection) -> None:
             migrate = PPT_PAGES_MIGRATION_COLUMNS
         else:
             migrate = []
+        # Add columns that main has but shard is missing.
         for col, typedef in migrate:
             if col in main_cols and col not in shard_cols:
                 target.execute(
                     f"ALTER TABLE shard.{table} ADD COLUMN {col} {typedef}"
                 )
+        # Drop columns that shard has but main no longer has (schema
+        # evolution — e.g. ``summary_format_version``, ``old_summary``).
+        extra_cols = shard_cols - main_cols
+        for col in extra_cols:
+            target.execute(f"ALTER TABLE shard.{table} DROP COLUMN {col}")
 
 
 def reassemble_database(
