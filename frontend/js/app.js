@@ -261,6 +261,7 @@ document.addEventListener("alpine:init", () => {
     setupError: "", setupTesting: false,
     settingsForm: {}, showSecrets: {},
     exportDialogOpen: false, exportSelection: {}, exportingPdf: false,
+    deleteDialogOpen: false, deleteSelection: {}, deletingCourses: false,
     repoOwner: "", repoName: "", dataBranch: "data",
     _history: [],
     /* Subscriptions editor state — three-column layout:
@@ -555,6 +556,68 @@ document.addEventListener("alpine:init", () => {
         );
       } catch (e) {
         this._toast("复制失败：" + (e?.message || "unknown"), "error");
+      }
+    },
+
+    getDeletableLectures() {
+      return (this.lectures || []).filter((lec) => lec.state === "ready");
+    },
+    openDeleteDialog() {
+      const list = this.getDeletableLectures();
+      if (!list.length) { this._toast("没有可删除的课次", "error"); return; }
+      this.deleteSelection = {};
+      list.forEach((lec) => { this.deleteSelection[lec.sub_id] = false; });
+      this.deleteDialogOpen = true;
+    },
+    closeDeleteDialog() {
+      if (this.deletingCourses) return;
+      this.deleteDialogOpen = false;
+    },
+    toggleDeleteLecture(subId, checked) { this.deleteSelection[subId] = !!checked; },
+    setDeleteAll(checked) {
+      this.getDeletableLectures().forEach((lec) => { this.deleteSelection[lec.sub_id] = !!checked; });
+    },
+    isDeleteAllSelected() {
+      const list = this.getDeletableLectures();
+      return list.length > 0 && list.every((lec) => this.deleteSelection[lec.sub_id]);
+    },
+    selectedDeleteCount() {
+      return this.getDeletableLectures().filter((lec) => this.deleteSelection[lec.sub_id]).length;
+    },
+    async confirmDelete() {
+      if (this.deletingCourses) return;
+      const selected = this.getDeletableLectures().filter(
+        (lec) => this.deleteSelection[lec.sub_id]
+      );
+      if (!selected.length) {
+        this._toast("请至少选择一节课程", "error");
+        return;
+      }
+      const creds = _loadCreds();
+      if (!creds?.token) {
+        this._toast("未登录或 PAT 缺失", "error");
+        return;
+      }
+      if (!confirm("确定要删除选中的 " + selected.length + " 节课吗？此操作不可撤销。")) return;
+      this.deletingCourses = true;
+      try {
+        var currentCid = this.currentCourse ? String(this.currentCourse.course_id) : null;
+        var currentIds = ICS.db.getSubscribedCourseIds();
+        if (currentCid && currentIds) {
+          var newIds = currentIds.filter(function (id) { return String(id) !== currentCid; });
+          await ICS.github.setCourseIdsSecret(this.repoOwner, this.repoName, creds.token, newIds);
+        }
+        await ICS.github.triggerDeleteWorkflow(
+          this.repoOwner, this.repoName, "main", creds.token,
+          [currentCid],
+        );
+        this.deleteDialogOpen = false;
+        this._toast("已触发删除 workflow，数据将在几分钟内从远端清除", "success");
+        setTimeout(() => { this._go("courses"); }, 1500);
+      } catch (e) {
+        this._toast(e?.message || "删除失败", "error");
+      } finally {
+        this.deletingCourses = false;
       }
     },
 
