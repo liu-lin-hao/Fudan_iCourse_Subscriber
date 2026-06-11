@@ -282,6 +282,7 @@ document.addEventListener("alpine:init", () => {
     _subsFilterTimer: null, _deptFilterTimer: null,
     subsSaving: false, subsError: "",
     singleRunTriggering: false,
+    singleRunUseOfficial: false,
     /* Per-browser pinned-courses set, lazily synced to localStorage. */
     starred: _loadStarred(),
 
@@ -983,7 +984,7 @@ document.addEventListener("alpine:init", () => {
         // than overloading the scheduled check workflow.
         await ICS.github.triggerSingleRunWorkflow(
           this.repoOwner, this.repoName, "main", creds.token,
-          this.singleRunIds,
+          this.singleRunIds, this.singleRunUseOfficial,
         );
         this._toast(
           "已触发单次运行，处理 " + this.singleRunIds.length + " 门课。请到 Actions 查看进度",

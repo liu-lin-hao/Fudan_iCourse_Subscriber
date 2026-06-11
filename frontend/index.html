@@ -705,6 +705,13 @@
             <div x-show="subsSaving" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
             <span x-text="subsSaving ? '加密上传中…' : '保存订阅到 Secret'"></span>
           </button>
+          <label class="flex items-center gap-1.5 cursor-pointer select-none"
+                 :class="singleRunIds.length === 0 ? 'opacity-40' : ''">
+            <input type="checkbox" x-model="singleRunUseOfficial"
+                   :disabled="singleRunIds.length === 0"
+                   class="w-3.5 h-3.5 rounded border-gray-300 text-emerald-500 focus:ring-emerald-400">
+            <span class="text-xs text-gray-500">官方字幕</span>
+          </label>
           <button @click="runSingleRunWorkflow()" :disabled="singleRunTriggering || singleRunIds.length === 0"
                   class="px-5 py-2.5 bg-emerald-500 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 disabled:opacity-50 flex items-center gap-2">
             <div x-show="singleRunTriggering" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>

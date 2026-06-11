@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Optional
 from src.ai import bucketer
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
+from src.runtime import config
 
 if TYPE_CHECKING:
     from src.data.database import Database
@@ -202,19 +203,20 @@ class LectureRunner:
             )
             return existing["transcript"], None
 
-        # Try official transcript before firing up ASR.
-        try:
-            official = self._client.get_transcript_segments(sub_id)
-            if self._official_transcript_usable(official):
-                text = " ".join(s["text"] for s in official)
-                self._reporter.info(
-                    f"    Using official transcript "
-                    f"({len(text)} chars, {len(official)} segments)"
-                )
-                self._db.update_transcript(sub_id, text)
-                return text, official
-        except Exception:
-            pass  # fall through to ASR
+        # Try official transcript before firing up ASR (config-gated).
+        if config.USE_OFFICIAL_TRANSCRIPT:
+            try:
+                official = self._client.get_transcript_segments(sub_id)
+                if self._official_transcript_usable(official):
+                    text = " ".join(s["text"] for s in official)
+                    self._reporter.info(
+                        f"    Using official transcript "
+                        f"({len(text)} chars, {len(official)} segments)"
+                    )
+                    self._db.update_transcript(sub_id, text)
+                    return text, official
+            except Exception:
+                pass  # fall through to ASR
 
         # Pull the audio handle.  ``schedule`` is idempotent — usually the
         # previous lecture already kicked it off (Phase C), but for the

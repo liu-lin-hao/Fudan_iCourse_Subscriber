@@ -7,6 +7,11 @@ on:
         description: "Comma-separated course IDs to process (e.g. 30004,30005)"
         required: true
         type: string
+      use_official_transcript:
+        description: "Use official iCourse transcripts instead of ASR"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -157,6 +162,7 @@ jobs:
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ inputs.course_ids }}
+          USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}

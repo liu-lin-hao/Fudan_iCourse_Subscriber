@@ -164,6 +164,12 @@ VIDEO_DOWNLOAD_CONCURRENCY = int(
     os.environ.get("VIDEO_DOWNLOAD_CONCURRENCY", "2")
 )
 
+# 是否优先使用 iCourse 官方字幕（跳过 ASR 转录）。默认关闭。
+USE_OFFICIAL_TRANSCRIPT = (
+    os.environ.get("USE_OFFICIAL_TRANSCRIPT", "").strip().lower()
+    in ("1", "true", "yes")
+)
+
 # 监控的课程 ID 列表
 COURSE_IDS = [
     c.strip()

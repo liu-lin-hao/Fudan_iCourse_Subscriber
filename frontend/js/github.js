@@ -266,22 +266,19 @@ async function _setCourseIdsSecret(owner, repo, token, courseIds) {
   return value;
 }
 
-async function _triggerSingleRunWorkflow(owner, repo, ref, token, courseIds) {
-  // Fires the Single Run workflow (single_run.yml) via workflow_dispatch.
-  // The workflow takes a ``course_ids`` input (comma-separated list) and
-  // processes ONLY those courses without touching the persisted
-  // ``COURSE_IDS`` secret used by the daily check workflow.
-  // PAT needs ``Actions: Read and write``.
+async function _triggerSingleRunWorkflow(owner, repo, ref, token, courseIds, useOfficial) {
   const url = `${_GH_API}/repos/${owner}/${repo}/actions/workflows/single_run.yml/dispatches`;
   const ids = (Array.isArray(courseIds) ? courseIds : [])
     .map(String).map((s) => s.trim()).filter(Boolean).join(",");
   if (!ids) throw new Error("单次运行列表为空");
+  const inputs = { course_ids: ids };
+  if (useOfficial) inputs.use_official_transcript = "true";
   const res = await fetch(url, {
     method: "POST",
     headers: { ..._ghHeaders(token), "Content-Type": "application/json" },
     body: JSON.stringify({
       ref: ref || "main",
-      inputs: { course_ids: ids },
+      inputs: inputs,
     }),
   });
   if (res.status === 204) return;
