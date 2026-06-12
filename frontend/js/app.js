@@ -361,6 +361,20 @@ document.addEventListener("alpine:init", () => {
         this.currentPptPages = this.currentLecture
           ? ICS.db.getPptPages(this.currentLecture.sub_id)
           : [];
+        // Opening from search lands here without a matching course context;
+        // load the lecture's own course so prev/next nav + the lectures list
+        // (used by _currentLectureIndex) are correct rather than stale/empty.
+        if (this.currentLecture) {
+          var cid = String(this.currentLecture.course_id);
+          if (!this.currentCourse || String(this.currentCourse.course_id) !== cid) {
+            this.currentCourse =
+              this.courses.find((x) => String(x.course_id) === cid)
+              || { course_id: cid,
+                   title: this.currentLecture.course_title || "",
+                   teacher: this.currentLecture.teacher || "" };
+            this.lectures = ICS.db.getLectures(cid);
+          }
+        }
         this.detailView = "summary";
       }
       this.view = view;
