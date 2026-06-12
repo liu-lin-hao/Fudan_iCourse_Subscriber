@@ -115,20 +115,14 @@ class LectureRunner:
         _ = ppt_stats  # stats are emitted by PPTAsyncHandle.drain via reporter
 
         # ── Phase E2 — kick off next lecture's OCR (runs during LLM) ───
-        # Images were prefetched in Phase C; switch to OCR phase by
-        # submitting pending pages to the OCR pool so they run in the
-        # background while this lecture's LLM call waits for the API.
+        # Images were prefetched in Phase C; prefetch_and_ocr spawns a
+        # background thread that collects them, dedups and submits OCR,
+        # so the whole thing genuinely overlaps with this lecture's LLM
+        # wait.  Whatever isn't finished when the LLM returns is absorbed
+        # by the next lecture's own PPTPipeline.submit().
         if next_info:
             next_course, next_sub = next_info
-            try:
-                self._ppt.prefetch_and_ocr(
-                    self._client, next_course, next_sub,
-                )
-            except Exception as e:
-                self._reporter.info(
-                    f"    [Prefetch OCR] {next_sub} failed: "
-                    f"{type(e).__name__}: {e}"
-                )
+            self._ppt.prefetch_and_ocr(self._client, next_course, next_sub)
 
         # ── Phase F — bucketed-prompt LLM summary ──────────────────────
         if not transcript.strip():

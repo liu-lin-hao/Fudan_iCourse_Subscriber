@@ -41,6 +41,7 @@ invalid / failed pages naturally drop out of the LLM prompt.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import Future, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -159,6 +160,10 @@ class PPTPipeline:
         # Keyed by sub_id; submit() drains them before starting ASR if the
         # pre-submitted OCR hasn't completed yet.
         self._prefetched_ocr: dict[str, list[Future]] = {}
+        # The background threads driving prefetch_and_ocr, keyed by sub_id.
+        # submit() joins the thread before reading _prefetched_ocr, which
+        # is also what makes the dict handoff thread-safe.
+        self._prefetch_threads: dict[str, threading.Thread] = {}
 
     # ── Public entry points ─────────────────────────────────────────────
 
@@ -209,27 +214,49 @@ class PPTPipeline:
 
     def prefetch_and_ocr(self, client: "ICourseClient", course_id: str,
                           sub_id: str) -> None:
-        """Download images + dedup + submit OCR for a lecture, but DON'T
-        drain or discard the prefetch cache.
+        """Kick off download + dedup + OCR for a lecture in a background
+        thread, without draining or discarding the prefetch cache.
 
-        Designed to be called during the LLM wait of the *previous* lecture.
-        OCR runs in the background pool while the API call is in flight.
-        The subsequent ``submit()`` call for this lecture joins the OCR
-        futures and only processes pages that are still pending.
+        Designed to be called right before the LLM wait of the *previous*
+        lecture: image collection, dHash and OCR all overlap with the API
+        call instead of blocking the main thread.  Whatever hasn't finished
+        by the time the LLM returns is simply absorbed by this lecture's
+        own ``submit()`` — it joins the thread, drains the OCR futures,
+        and processes any rows that are still pending.
 
         The prefetch cache is intentionally NOT discarded here — the
         real ``submit()`` call in Phase B of the next lecture handles that.
         """
         sub_id = str(sub_id)
-        images, _ = self._collect_survivors(client, course_id, sub_id)
-        if not images:
+        if sub_id in self._prefetch_threads:
             return
-        if self._reporter:
-            self._reporter.ocr_progress_start(sub_id, len(images))
-        self._prefetched_ocr[sub_id] = [
-            self._scheduler.submit_ocr(self._ocr_worker, sub_id, pn, img)
-            for pn, img in images.items()
-        ]
+        t = threading.Thread(
+            target=self._prefetch_worker,
+            args=(client, course_id, sub_id),
+            name=f"ppt-prefetch-{sub_id}",
+            daemon=True,
+        )
+        self._prefetch_threads[sub_id] = t
+        t.start()
+
+    def _prefetch_worker(self, client: "ICourseClient", course_id: str,
+                         sub_id: str) -> None:
+        try:
+            images, _ = self._collect_survivors(client, course_id, sub_id)
+            if not images:
+                return
+            if self._reporter:
+                self._reporter.ocr_progress_start(sub_id, len(images))
+            self._prefetched_ocr[sub_id] = [
+                self._scheduler.submit_ocr(self._ocr_worker, sub_id, pn, img)
+                for pn, img in images.items()
+            ]
+        except Exception as e:
+            if self._reporter:
+                self._reporter.info(
+                    f"    [Prefetch OCR] {sub_id} failed: "
+                    f"{type(e).__name__}: {e}"
+                )
 
     def run_blocking(self, client: "ICourseClient", course_id: str,
                      sub_id: str) -> PPTStats:
@@ -239,7 +266,11 @@ class PPTPipeline:
     # ── Shared stages 1-3 ───────────────────────────────────────────────
 
     def _join_prefetch(self, sub_id: str) -> None:
-        """Block for OCR futures a prior ``prefetch_and_ocr`` submitted."""
+        """Wait out a prior ``prefetch_and_ocr`` for sub_id: join its
+        worker thread, then block for the OCR futures it submitted."""
+        t = self._prefetch_threads.pop(sub_id, None)
+        if t is not None:
+            t.join()
         futs = self._prefetched_ocr.pop(sub_id, None)
         if not futs:
             return
